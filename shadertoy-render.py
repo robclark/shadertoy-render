@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) 2015, Alex J. Champandard
 # Copyright (c) 2015, Vispy Development Team.
@@ -22,6 +22,8 @@ from vispy import app
 import os
 import requests
 import imageio
+import urllib.request, urllib.parse
+import json
 
 url = 'https://www.shadertoy.com/api/v1/shaders'
 key = '?key=NdnKw7'
@@ -127,8 +129,8 @@ class RenderingCanvas(app.Canvas):
             self.program['iChannel%d' % chan] = tex
             self.program['iChannelResolution[%d]' % chan] = img.shape
 
-
-        self.size = (size[0] / self.pixel_scale, size[1] / self.pixel_scale)
+        # TODO this doesn't seem to work with python3
+        #self.size = (size[0] / self.pixel_scale, size[1] / self.pixel_scale)
         self.show()
 
     def on_draw(self, event):
@@ -174,10 +176,24 @@ if __name__ == '__main__':
     resolution = [int(i) for i in args.size.split('x')]
 
     print('Fetching shader: {}'.format(args.id))
-    print('url: {}/{}{}'.format(url, args.id, key))
-    r = requests.get(url + '/' + args.id + key)
-    j = r.json()
-    s = j['Shader']
+
+    # For some reason, this doesn't always work, so if needed try a
+    # different way:
+    try:
+        r = requests.get(url + '/' + args.id + key)
+        j = r.json()
+        s = j['Shader']
+    except KeyError:
+        alt_url = 'https://www.shadertoy.com/shadertoy'
+        headers = { 'Referer' : 'https://www.shadertoy.com/' }
+        values  = { 's' : json.dumps ({'shaders' : [args.id]}) }
+
+        data = urllib.parse.urlencode (values).encode ('utf-8')
+        req  = urllib.request.Request (alt_url, data, headers)
+        response = urllib.request.urlopen (req)
+        shader_json = response.read ().decode ('utf-8')
+        j = json.loads (shader_json)
+        s = j[0]
 
     info = s['info']
     print('Name: ' + info['name'])
