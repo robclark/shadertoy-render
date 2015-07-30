@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2015, Alex J. Champandard
 # Copyright (c) 2015, Vispy Development Team.
+# Copyright (c) 2015, Rob Clark
+#
 # Distributed under the (new) BSD License.
 
 from __future__ import (unicode_literals, print_function)
@@ -16,6 +18,13 @@ import numpy
 import vispy
 from vispy import gloo
 from vispy import app
+
+import os
+import requests
+import imageio
+
+url = 'https://www.shadertoy.com/api/v1/shaders'
+key = '?key=NdnKw7'
 
 
 vertex = """
@@ -36,12 +45,9 @@ uniform float     iGlobalTime;           // shader playback time (in seconds)
 uniform vec4      iMouse;                // mouse pixel coords
 uniform vec4      iDate;                 // (year, month, day, time in seconds)
 uniform float     iSampleRate;           // sound sample rate (i.e., 44100)
-uniform sampler2D iChannel0;             // input channel. XX = 2D/Cube
-uniform sampler2D iChannel1;             // input channel. XX = 2D/Cube
-uniform sampler2D iChannel2;             // input channel. XX = 2D/Cube
-uniform sampler2D iChannel3;             // input channel. XX = 2D/Cube
 uniform vec3      iChannelResolution[4]; // channel resolution (in pixels)
 uniform float     iChannelTime[4];       // channel playback time (in sec)
+%s
 
 %s
 
@@ -60,16 +66,31 @@ def get_idate():
     return (now.year, now.month, now.day, delta.seconds)
 
 
-def noise(resolution=64, nchannels=1):
-    size = (resolution, resolution, nchannels)
-    return numpy.random.randint(low=0, high=256, size=size).astype(numpy.uint8)
-
-
 class RenderingCanvas(app.Canvas):
 
-    def __init__(self, glsl, stdout=None, size=None, rate=30.0, duration=None):
+    def __init__(self, renderpass, size=None, rate=30.0, duration=None):
         app.Canvas.__init__(self, keys='interactive', size=size, title='ShaderToy Renderer')
-        self.program = gloo.Program(vertex, fragment % glsl)
+
+        # Figure out our up-to-four inputs:
+        samplers = ""
+        for input in renderpass['inputs']:
+            #print(str(input))
+            t = input['ctype']
+            chan = input['channel'];
+            if t == "texture":
+                samp = "sampler2D"
+            elif t == "cubemap":
+                samp = "samplerCube"
+            elif t == "music":
+                # skip
+                continue
+            else:
+                raise Exception("Unknown sampler type: %s" % t)
+            samplers = samplers + ("\nuniform %s iChannel%d;" % (samp, chan))
+
+        glsl = fragment % (samplers, renderpass['code'])
+        #print(glsl)
+        self.program = gloo.Program(vertex, glsl)
         self.program["position"] = [(-1, -1), (-1, 1), (1, 1), (-1, -1), (1, 1), (1, -1)]
         self.program['iMouse'] = 0.0, 0.0, 0.0, 0.0
         self.program['iSampleRate'] = 44100.0
@@ -80,28 +101,39 @@ class RenderingCanvas(app.Canvas):
 
         self.activate_zoom()
 
-        self._stdout = stdout
         self._rate = rate
         self._duration = duration
         self._timer = app.Timer('auto', connect=self.on_timer, start=True)
 
+        # Fetch and setup input textures:
+        for input in renderpass['inputs']:
+            t    = input['ctype']
+            chan = input['channel']
+            src  = input['src']
+            print("Fetching texture: %s" % src)
+            if t == "texture":
+                img = imageio.imread("https://www.shadertoy.com/%s" % src)
+                tex = gloo.Texture2D(img)
+            elif t == "cubemap":
+                # NOTE: cubemap textures, the src seems to give only the first
+                # face, ie. cube04_0.png, and we have to infer cube04_1.png,
+                # to cube04_5.png for the remaining faces..
+                raise Exception("TODO: TextureCubeMap not implemented!")
+            elif t == "music":
+                # skip
+                continue
+            tex.interpolation = 'linear'
+            tex.wrapping = 'repeat'
+            self.program['iChannel%d' % chan] = tex
+            self.program['iChannelResolution[%d]' % chan] = img.shape
+
+
         self.size = (size[0] / self.pixel_scale, size[1] / self.pixel_scale)
         self.show()
-
-    def set_channel_input(self, img, i=0):
-        tex = gloo.Texture2D(img)
-        tex.interpolation = 'linear'
-        tex.wrapping = 'repeat'
-        self.program['iChannel%d' % i] = tex
-        self.program['iChannelResolution[%d]' % i] = img.shape
 
     def on_draw(self, event):
         self.program['iGlobalTime'] += 1.0 / self._rate
         self.program.draw()
-
-        if self._stdout is not None:
-            framebuffer = vispy.gloo.util._screenshot((0, 0, self.physical_size[0], self.physical_size[1]))
-            self._stdout.write(framebuffer.tostring())
 
         if self._duration is not None and self.program['iGlobalTime'] >= self._duration:
             app.quit()
@@ -132,42 +164,35 @@ if __name__ == '__main__':
     vispy.set_log_level('WARNING')
     vispy.use(app='glfw')
 
-    parser = argparse.ArgumentParser(description='Render a ShaderToy script directly to a video file.')
-    parser.add_argument('input', type=str, help='Source shader file to load from disk.')
-    parser.add_argument('output', type=str, help='The destination video file to write.')
+    parser = argparse.ArgumentParser(description='Render a ShaderToy script.')
+    parser.add_argument('id', type=str, help='Shadertoy shader id.')
     parser.add_argument('--rate', type=int, default=30, help='Number of frames per second to render, e.g. 60 (int).')
     parser.add_argument('--duration', type=float, default=None, help='Total seconds of video to encode, e.g. 30.0 (float).')
     parser.add_argument('--size', type=str, default='1280x720', help='Width and height of the rendering, e.g. 1920x1080 (string).')
-    parser.add_argument('--verbose', default=False, action='store_true', help='Call subprocess with a high logging level.')
     args = parser.parse_args()
     
     resolution = [int(i) for i in args.size.split('x')]
-    ffmpeg = subprocess.Popen(
-                ('ffmpeg',
-                 '-threads', '0',
-                 '-loglevel', 'verbose' if args.verbose else 'panic',
-                 '-r', '%d' % args.rate,
-                 '-f', 'rawvideo',
-                 '-pix_fmt', 'rgba',
-                 '-s', args.size,
-                 '-i', '-',
-                 '-c:v', 'libx264',
-                 '-y', args.output),
-                 stdin=subprocess.PIPE)
 
-    glsl_shader = open(args.input, 'r').read()
-    canvas = RenderingCanvas(glsl_shader,
-                             stdout=ffmpeg.stdin,
+    print('Fetching shader: {}'.format(args.id))
+    print('url: {}/{}{}'.format(url, args.id, key))
+    r = requests.get(url + '/' + args.id + key)
+    j = r.json()
+    s = j['Shader']
+
+    info = s['info']
+    print('Name: ' + info['name'])
+    print('Description: ' + info['description'])
+    print('Author: ' + info['username'])
+
+    # first renderpass seems to always be video (and second is audio if present.. we'll skip that..)
+    renderpass = s['renderpass'][0]
+
+    canvas = RenderingCanvas(renderpass,
                              size=resolution,
                              rate=args.rate,
                              duration=args.duration)
-    canvas.set_channel_input(noise(resolution=256, nchannels=3), i=0)
-    canvas.set_channel_input(noise(resolution=256, nchannels=1), i=1)
 
     try:
         canvas.app.run()
     except KeyboardInterrupt:
         pass
-        
-    ffmpeg.stdin.close()
-    ffmpeg.wait()
