@@ -49,6 +49,7 @@ uniform vec4      iDate;                 // (year, month, day, time in seconds)
 uniform float     iSampleRate;           // sound sample rate (i.e., 44100)
 uniform vec3      iChannelResolution[4]; // channel resolution (in pixels)
 uniform float     iChannelTime[4];       // channel playback time (in sec)
+uniform float     iTime;
 %s
 
 %s
